@@ -1,0 +1,71 @@
+pipeline {
+  agent any
+  environment {
+    REPO = 'https://github.com/Monuchauhan80/Password-encription-and-decription.git'
+    CLONE_DIR = 'repo'
+  }
+
+  stages {
+    stage('Checkout') {
+      steps {
+        // simple clone of default branch (public repo)
+        sh """
+          rm -rf ${CLONE_DIR}
+          git clone --depth 1 ${REPO} ${CLONE_DIR}
+          ls -la ${CLONE_DIR}
+        """
+      }
+    }
+
+    stage('Find POM') {
+      steps {
+        script {
+          // find the first pom.xml (prefer repo root)
+          pom = sh(script: "cd ${env.CLONE_DIR} && ( [ -f pom.xml ] && echo pom.xml || find . -maxdepth 4 -type f -name pom.xml | head -n1 )", returnStdout: true).trim()
+          if (!pom) {
+            error "No pom.xml found in repository. Is this really a Maven project?"
+          }
+          // normalize path (remove leading ./)
+          pom = pom.replaceAll(/^\\.\\//, '')
+          echo "Using pom: ${pom}"
+          // store for later stages
+          env.POM_PATH = "${env.CLONE_DIR}/${pom}"
+          // determine module dir for mvn -f and for artifact archiving
+          def moduleDir = sh(script: "dirname \"${pom}\"", returnStdout: true).trim()
+          if (moduleDir == ".") { moduleDir = "${env.CLONE_DIR}" } else { moduleDir = "${env.CLONE_DIR}/${moduleDir}" }
+          env.MODULE_DIR = moduleDir
+          echo "Module dir: ${env.MODULE_DIR}"
+        }
+      }
+    }
+
+    stage('Build & Test') {
+      steps {
+        // use -f to point at the pom.xml so we don't depend on cwd
+        sh """
+          set -e
+          echo "Running mvn -f '${env.POM_PATH}' clean test package"
+          mvn -B -f '${env.POM_PATH}' clean test package
+        """
+      }
+    }
+
+    stage('Archive & Test Reports') {
+      steps {
+        // archive any jars produced in module target dir
+        archiveArtifacts artifacts: "${env.MODULE_DIR}/target/*.jar", fingerprint: true, allowEmptyArchive: true
+        // publish junit results if present
+        junit allowEmptyResults: true, testResults: "${env.MODULE_DIR}/target/surefire-reports/*.xml"
+      }
+    }
+  }
+
+  post {
+    always {
+      sh "echo 'Workspace listing:'; ls -R ${env.CLONE_DIR} | sed -n '1,200p' || true"
+    }
+    failure {
+      echo 'Build failed — check the console output for mvn errors.'
+    }
+  }
+}
